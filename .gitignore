@@ -1,0 +1,8 @@
+TOKEN_REFRESHED
+token_ventas.json
+credentials.json
+serviceAccountKey.json
+__pycache__/
+*.pyc
+.env
+firestore_rules
