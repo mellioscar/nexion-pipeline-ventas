@@ -1,0 +1,123 @@
+# .github/workflows/pipeline_ventas.yml
+# Pipeline diario: Gmail → ADN Vendedores + Proyectado → Firebase
+# Carlos Isla y Cía. — NET-LogistK ISLA
+
+name: Pipeline Ventas Diario
+
+on:
+  schedule:
+    # Argentina (ART) = UTC-3
+    # 22:30 ART = 01:30 UTC del día siguiente
+    - cron: '30 01 * * *'
+
+  # Ejecutar manualmente desde GitHub → Actions → Run workflow
+  workflow_dispatch:
+
+jobs:
+  pipeline:
+    name: Ventas ADN + Proyectado → Firebase
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+
+      # ── 1. Código ──────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Python ──────────────────────────────────────────────────────────
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      # ── 3. Restaurar credenciales desde Secrets ────────────────────────────
+      - name: Restaurar credenciales
+        env:
+          GMAIL_CREDENTIALS: ${{ secrets.GMAIL_CREDENTIALS_JSON }}
+          GMAIL_TOKEN:       ${{ secrets.GMAIL_TOKEN_VENTAS_JSON }}
+          FIREBASE_KEY:      ${{ secrets.FIREBASE_KEY_JSON }}
+        run: |
+          echo "$GMAIL_CREDENTIALS" > credentials.json
+          echo "$GMAIL_TOKEN"       > token_ventas.json
+          echo "$FIREBASE_KEY"      > serviceAccountKey.json
+          cat > .env << 'EOF'
+          GMAIL_CREDENTIALS_PATH=credentials.json
+          GMAIL_TOKEN_PATH=token_ventas.json
+          ASUNTO_VENTAS=Estadisticas Ventas diarias
+          EOF
+
+      # ── 4. Ejecutar pipeline ───────────────────────────────────────────────
+      - name: Ejecutar pipeline
+        run: python pipeline_ventas_gmail.py
+
+      # ── 5. Persistir token si fue refrescado ───────────────────────────────
+      # pipeline_ventas_gmail.py crea TOKEN_REFRESHED cuando renueva el token.
+      # En ese caso actualizamos el Secret para la próxima ejecución.
+      - name: Actualizar Secret si el token fue refrescado
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_SECRETS }}
+          REPO:     ${{ github.repository }}
+        run: |
+          if [ ! -f "TOKEN_REFRESHED" ]; then
+            echo "Token no fue refrescado — sin cambios."
+            exit 0
+          fi
+
+          echo "Token refrescado — actualizando Secret GMAIL_TOKEN_VENTAS_JSON..."
+          pip install PyNaCl -q
+
+          python3 << 'PYEOF'
+          import os, base64, json, urllib.request, urllib.error
+
+          token    = open("token_ventas.json").read()
+          gh_token = os.environ["GH_TOKEN"]
+          repo     = os.environ["REPO"]
+          headers  = {
+              "Authorization": f"token {gh_token}",
+              "Content-Type":  "application/json",
+              "Accept":        "application/vnd.github+json",
+          }
+
+          # Obtener clave pública del repo
+          req  = urllib.request.Request(
+              f"https://api.github.com/repos/{repo}/actions/secrets/public-key",
+              headers=headers
+          )
+          with urllib.request.urlopen(req) as r:
+              pk_data = json.loads(r.read())
+
+          key_id  = pk_data["key_id"]
+          pub_key = pk_data["key"]
+
+          # Encriptar con PyNaCl
+          from nacl import encoding, public
+          pk  = public.PublicKey(pub_key.encode(), encoding.Base64Encoder())
+          box = public.SealedBox(pk)
+          enc = base64.b64encode(box.encrypt(token.encode())).decode()
+
+          # Actualizar Secret
+          body = json.dumps({"encrypted_value": enc, "key_id": key_id}).encode()
+          req2 = urllib.request.Request(
+              f"https://api.github.com/repos/{repo}/actions/secrets/GMAIL_TOKEN_VENTAS_JSON",
+              data=body, headers=headers, method="PUT"
+          )
+          try:
+              urllib.request.urlopen(req2)
+              print("✓ Secret GMAIL_TOKEN_VENTAS_JSON actualizado")
+          except urllib.error.HTTPError as e:
+              print(f"Error al actualizar Secret: {e.code} {e.read()}")
+          PYEOF
+
+      # ── 6. Limpieza — SIEMPRE se ejecuta ──────────────────────────────────
+      - name: Limpiar archivos sensibles
+        if: always()
+        run: |
+          rm -f credentials.json token_ventas.json serviceAccountKey.json \
+                .env TOKEN_REFRESHED
+          echo "✓ Credenciales eliminadas del runner"
