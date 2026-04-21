@@ -1,22 +1,17 @@
 """
 pipeline_ventas_gmail.py
-Bridge: Gmail → Excel → analizar_ventas.py → proyectado_ventas.py
+Bridge: Gmail → Excel → analizar_ventas.py → Firebase
 Carlos Isla y Cía. — NET-LogistK ISLA
 
 Flujo:
     1. Busca en Gmail el email con asunto configurable (no procesado aún)
     2. Descarga el adjunto .xlsx a un archivo temporal
     3. Renombra columnas del formato diario al esquema de analizar_ventas.py
-    4. Llama a cargar_xlsx() → limpiar_datos() → pipeline ADN completo
-    5. Llama a calcular_proyectado() usando feriados de Firestore
-    6. Marca el email con label NEXION_VTA_PROCESADO
+    4. Llama a cargar_xlsx() → limpiar_datos() → pipeline ADN completo → Firebase
+    5. Marca el email con label NEXION_VTA_PROCESADO
 
-Notas:
-    - cargar_xlsx() espera un PATH de archivo → usamos tempfile
-    - subir_a_firebase() inicializa Firebase con FIREBASE_CREDENTIALS_PATH
-    - proyectado sube a indicadores/comercial/ventas_proyectado/{periodo}
-    - si el token OAuth se renueva, crea TOKEN_REFRESHED para que
-      GitHub Actions lo persista de vuelta al Secret
+Nota: cargar_xlsx() espera un PATH de archivo → se usa tempfile.
+El proyectado se calcula desde NET-LogistK ISLA con los feriados de Firestore.
 """
 
 import os
@@ -38,7 +33,6 @@ from analizar_ventas import (
     calcular_sucursales, calcular_clientes, calcular_articulos,
     subir_a_firebase, imprimir_resumen,
 )
-from proyectado_ventas import calcular_proyectado, subir_proyectado
 
 load_dotenv()
 
@@ -53,8 +47,7 @@ log = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────
 # MAPEO: columnas export diario Nexion → analizar_ventas.py
-# Solo las que cambian de nombre. Las que ya coinciden no se listan.
-# Ajustar si Nexion cambia algún nombre de columna en el futuro.
+# Solo las que cambian de nombre. Ajustar si Nexion los modifica.
 # ─────────────────────────────────────────────────────────
 MAPEO_COLUMNAS = {
     "FecComp":      "Fec. Comp.",
@@ -94,8 +87,8 @@ COLS_REQUERIDAS = [
 def get_gmail_service():
     """
     OAuth2 con persistencia de token refresh.
-    Crea TOKEN_REFRESHED si el token fue renovado → el workflow de
-    GitHub Actions lo detecta y actualiza el Secret automáticamente.
+    Crea TOKEN_REFRESHED si el token fue renovado → GitHub Actions
+    lo detecta y actualiza el Secret automáticamente.
     """
     creds = None
     if os.path.exists(GMAIL_TOKEN):
@@ -108,7 +101,7 @@ def get_gmail_service():
             creds.refresh(Request())
             token_refrescado = True
         else:
-            # Primera ejecución local: abre el navegador una sola vez
+            # Solo en la primera ejecución local — abre el navegador
             flow = InstalledAppFlow.from_client_secrets_file(
                 GMAIL_CREDENTIALS, GMAIL_SCOPES
             )
@@ -142,7 +135,7 @@ def buscar_email(service) -> str | None:
 def descargar_a_tempfile(service, msg_id: str) -> str | None:
     """
     Descarga el adjunto .xlsx a un archivo temporal y retorna su path.
-    cargar_xlsx() requiere un path de archivo, no bytes en memoria.
+    cargar_xlsx() requiere un path, no bytes en memoria.
     """
     mensaje = service.users().messages().get(userId="me", id=msg_id).execute()
     for parte in mensaje.get("payload", {}).get("parts", []):
@@ -170,11 +163,10 @@ def descargar_a_tempfile(service, msg_id: str) -> str | None:
 
 def normalizar_columnas(tmp_path: str) -> str:
     """
-    Lee el Excel del export diario, renombra las columnas al esquema
-    que espera cargar_xlsx(), y sobreescribe el mismo archivo temporal.
-
-    Importante: hay que hacerlo ANTES de llamar a cargar_xlsx()
-    porque esa función usa sys.exit(1) si faltan columnas.
+    Renombra las columnas del export diario al esquema de analizar_ventas.py
+    y sobreescribe el archivo temporal.
+    Debe hacerse ANTES de cargar_xlsx() porque esa función usa sys.exit(1)
+    si faltan columnas requeridas.
     """
     df = pd.read_excel(tmp_path, header=0)
     log.info(f"Columnas en el export: {list(df.columns)}")
@@ -189,7 +181,7 @@ def normalizar_columnas(tmp_path: str) -> str:
             f"Revisar MAPEO_COLUMNAS contra el export real de Nexion."
         )
 
-    log.info(f"✓ Columnas normalizadas. Renombradas: {list(renombrar.keys())}")
+    log.info(f"✓ Columnas OK. Renombradas: {list(renombrar.keys())}")
     df.to_excel(tmp_path, index=False)
     return tmp_path
 
@@ -216,7 +208,7 @@ def marcar_procesado(service, msg_id: str):
 
 def main():
     log.info("=" * 60)
-    log.info("PIPELINE VENTAS: Gmail → ADN Vendedores + Proyectado")
+    log.info("PIPELINE VENTAS: Gmail → ADN Vendedores → Firebase")
     log.info("=" * 60)
 
     tmp_path = None
@@ -235,8 +227,8 @@ def main():
         # 3. Normalizar columnas → sobreescribe el temp
         tmp_path = normalizar_columnas(tmp_path)
 
-        # 4. Pipeline ADN — analizar_ventas.py sin modificaciones
-        df = cargar_xlsx(tmp_path)   # valida columnas, usa sys.exit(1) si faltan
+        # 4. Pipeline ADN completo — analizar_ventas.py sin modificaciones
+        df = cargar_xlsx(tmp_path)
         df = limpiar_datos(df)
 
         # Período desde los datos (no desde el nombre del archivo)
@@ -257,19 +249,11 @@ def main():
         # Sube a indicadores/comercial/ventas_analytics/{periodo}
         subir_a_firebase(periodo, vendedores, sucursales, clientes, articulos, df)
 
-        # 5. Proyectado — usa Firebase ya inicializado por subir_a_firebase()
-        import firebase_admin
-        from firebase_admin import firestore as fs
-        db         = fs.client()
-        proyectado = calcular_proyectado(df, vendedores, periodo, db)
-        subir_proyectado(proyectado, db)   # → indicadores/comercial/ventas_proyectado/{periodo}
-
-        # 6. Marcar email procesado
+        # 5. Marcar email procesado
         marcar_procesado(service, msg_id)
 
         log.info(f"\n✅ Pipeline completo — {periodo}")
-        log.info(f"   Vendedores : {len(vendedores)}")
-        log.info(f"   Proyectado : ${proyectado['neto_proyectado']/1e6:.2f}M al cierre")
+        log.info(f"   Vendedores procesados: {len(vendedores)}")
 
     finally:
         # Siempre limpiar el temp aunque haya error
