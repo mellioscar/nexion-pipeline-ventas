@@ -76,6 +76,7 @@ MAPEO_COLUMNAS = {
     "NomMRART":     "Nombre marca",
     "NomGrupARTV":  "Nombre Grupo",
     "ClasComp":     "Clasificador Comprobante",
+    # AReparto: ya viene con ese nombre en el export diario — no necesita renombrado
 }
 
 # Las que cargar_xlsx() valida con sys.exit(1) si faltan
@@ -192,6 +193,115 @@ def normalizar_columnas(tmp_path: str) -> str:
     log.info(f"✓ Columnas OK. Renombradas: {list(renombrar.keys())}")
     df.to_excel(tmp_path, index=False)
     return tmp_path
+
+
+
+# ─────────────────────────────────────────────
+# 4A. KPI REPARTO + FLETE  (nueva columna AReparto)
+# ─────────────────────────────────────────────
+
+def calcular_kpi_reparto(df: pd.DataFrame) -> dict:
+    """
+    KPI de cobro de flete sobre facturas marcadas a reparto.
+
+    AReparto = 1 → factura marcada para entrega con camión.
+    El KPI se mide a nivel de COMPROBANTE (Número):
+        pct_cobro_flete = comprobantes_a_reparto_con_flete
+                          / total_comprobantes_a_reparto * 100
+
+    Un comprobante "cobra flete" si tiene ≥1 línea de Nombre familia == FLETES.
+    """
+    if "AReparto" not in df.columns:
+        return {"disponible": False, "nota": "Columna AReparto no presente en el export"}
+
+    tiene_flete = df["Nombre familia"].str.upper().str.strip() == "FLETES"
+    a_reparto   = df["AReparto"] == 1
+    facturas    = df["Nom Sis TCOM"].isin(FACTURAS)
+
+    # Comprobantes a reparto únicos
+    nros_reparto  = df[facturas & a_reparto]["Número"].unique()
+    total_reparto = len(nros_reparto)
+
+    if total_reparto == 0:
+        return {"disponible": True, "total_reparto": 0, "con_flete": 0,
+                "sin_flete": 0, "pct_cobro_flete": 0.0,
+                "neto_flete_reparto": 0.0,
+                "por_vendedor": {}, "por_sucursal": {}}
+
+    nros_con_flete  = set(df[df["Número"].isin(nros_reparto) & tiene_flete]["Número"].unique())
+    con_flete       = len(nros_con_flete)
+    sin_flete       = total_reparto - con_flete
+    pct_cobro       = round(con_flete / total_reparto * 100, 1)
+    neto_flete_rep  = float(df[df["Número"].isin(nros_reparto) & tiene_flete]["Neto"].sum())
+
+    print(f"  Reparto: {total_reparto} comprobantes | "
+          f"Con flete: {con_flete} ({pct_cobro}%) | Sin flete: {sin_flete}")
+
+    # Por vendedor
+    por_vendedor = {}
+    for (cod, nom), g in df[facturas & a_reparto].groupby(["Vendedor", "Nombre vendedor"]):
+        nros_v       = g["Número"].unique()
+        total_v      = len(nros_v)
+        con_flete_v  = len(set(df[df["Número"].isin(nros_v) & tiene_flete]["Número"].unique()))
+        neto_flete_v = float(df[df["Número"].isin(nros_v) & tiene_flete]["Neto"].sum())
+        por_vendedor[str(cod)] = {
+            "nombre":          str(nom),
+            "total_reparto":   total_v,
+            "con_flete":       con_flete_v,
+            "sin_flete":       total_v - con_flete_v,
+            "pct_cobro_flete": round(con_flete_v / total_v * 100, 1) if total_v else 0.0,
+            "neto_flete":      round(neto_flete_v, 2),
+        }
+
+    # Por sucursal (usa columna sucursal si limpiar_datos() ya la creó)
+    por_sucursal = {}
+    dep_col = "sucursal" if "sucursal" in df.columns else "Nom DEP"
+    if dep_col in df.columns:
+        for suc, g in df[facturas & a_reparto].groupby(dep_col):
+            nros_s       = g["Número"].unique()
+            total_s      = len(nros_s)
+            con_flete_s  = len(set(df[df["Número"].isin(nros_s) & tiene_flete]["Número"].unique()))
+            neto_flete_s = float(df[df["Número"].isin(nros_s) & tiene_flete]["Neto"].sum())
+            por_sucursal[str(suc)] = {
+                "total_reparto":   total_s,
+                "con_flete":       con_flete_s,
+                "sin_flete":       total_s - con_flete_s,
+                "pct_cobro_flete": round(con_flete_s / total_s * 100, 1) if total_s else 0.0,
+                "neto_flete":      round(neto_flete_s, 2),
+            }
+
+    return {
+        "disponible":         True,
+        "total_reparto":      int(total_reparto),
+        "con_flete":          int(con_flete),
+        "sin_flete":          int(sin_flete),
+        "pct_cobro_flete":    pct_cobro,
+        "neto_flete_reparto": round(neto_flete_rep, 2),
+        "por_vendedor":       por_vendedor,
+        "por_sucursal":       por_sucursal,
+    }
+
+
+def subir_reparto_flete(kpi: dict, periodo: str, db):
+    """
+    Sube el KPI a:
+        indicadores/comercial/ventas_analytics/{periodo}/reparto_flete/resumen
+    """
+    from config import ROOT_COL, AREA_DOC, SUBCOLLECTIONS
+    import datetime as dt_mod
+    ref = (
+        db.collection(ROOT_COL)
+        .document(AREA_DOC)
+        .collection(SUBCOLLECTIONS["ventas"])
+        .document(periodo)
+        .collection("reparto_flete")
+        .document("resumen")
+    )
+    kpi["periodo"]   = periodo
+    kpi["timestamp"] = dt_mod.datetime.now(dt_mod.timezone.utc).isoformat()
+    ref.set(kpi)
+    print(f"  ✓ reparto_flete/resumen → Firestore OK "
+          f"({kpi.get('pct_cobro_flete', 0)}% cobro flete global)")
 
 
 # ─────────────────────────────────────────────────────────
@@ -394,7 +504,7 @@ def marcar_procesado(service, msg_id: str):
 # ─────────────────────────────────────────────────────────
 def main():
     log.info("=" * 60)
-    log.info("PIPELINE VENTAS: Gmail → ADN Vendedores + Flete → Firebase")
+    log.info("PIPELINE VENTAS: Gmail → ADN Vendedores + Flete + Reparto → Firebase")
     log.info("=" * 60)
 
     tmp_path = None
@@ -442,13 +552,21 @@ def main():
         flete = calcular_flete(df, periodo)
         subir_flete(flete, periodo, db)
 
-        # 6. Marcar email procesado
+        # 6. KPI Reparto + Flete (nueva columna AReparto)
+        log.info("\n📦 Calculando KPI reparto + flete...")
+        kpi_reparto = calcular_kpi_reparto(df)
+        subir_reparto_flete(kpi_reparto, periodo, db)
+
+        # 7. Marcar email procesado
         marcar_procesado(service, msg_id)
 
         log.info(f"\n✅ Pipeline completo — {periodo}")
-        log.info(f"   Vendedores    : {len(vendedores)}")
-        log.info(f"   Neto flete    : ${flete.get('neto_neto', 0)/1e6:.2f}M")
-        log.info(f"   Margen flete  : {flete.get('margen_pct', 0)}%")
+        log.info(f"   Vendedores       : {len(vendedores)}")
+        log.info(f"   Neto flete       : ${flete.get('neto_neto', 0)/1e6:.2f}M")
+        log.info(f"   Margen flete     : {flete.get('margen_pct', 0)}%")
+        if kpi_reparto.get("disponible"):
+            log.info(f"   Cobro flete rep. : {kpi_reparto.get('pct_cobro_flete', 0)}% "
+                     f"({kpi_reparto.get('con_flete', 0)}/{kpi_reparto.get('total_reparto', 0)} comp.)")
 
     finally:
         if tmp_path and os.path.exists(tmp_path):
