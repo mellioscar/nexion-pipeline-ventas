@@ -8,7 +8,7 @@ on:
   schedule:
     # Argentina (ART) = UTC-3
     # 22:30 ART = 01:30 UTC del día siguiente
-    - cron: '30 01 * * *'
+    - cron: '30 22 * * *'
 
   # Ejecutar manualmente desde GitHub → Actions → Run workflow
   workflow_dispatch:
