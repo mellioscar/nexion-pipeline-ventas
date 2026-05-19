@@ -758,7 +758,8 @@ def calcular_articulos(df: pd.DataFrame) -> Dict:
 
     # Incluir NC para neto real
     df_todos = df[df['es_factura'] | df['es_nd'] | df['es_nc']]
-    df_todos_no_flete = df_todos[~df_todos['es_flete']]
+    # Se incluye fletes para que coincida con la facturación neta total
+    df_todos_no_flete = df_todos
 
     # Por rubro
     rubros = df_todos_no_flete.groupby('Nombre rubro').agg(
