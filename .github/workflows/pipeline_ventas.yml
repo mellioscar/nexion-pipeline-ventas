@@ -12,6 +12,11 @@ on:
 
   # Ejecutar manualmente desde GitHub → Actions → Run workflow
   workflow_dispatch:
+    inputs:
+      gmail_query:
+        description: 'Query de Gmail opcional (Ej: subject:"Estadisticas Ventas diarias" after:2026/04/28 before:2026/05/02)'
+        required: false
+        default: ''
 
 jobs:
   pipeline:
@@ -53,6 +58,8 @@ jobs:
 
       # ── 4. Ejecutar pipeline ───────────────────────────────────────────────
       - name: Ejecutar pipeline
+        env:
+          GMAIL_SEARCH_QUERY: ${{ github.event.inputs.gmail_query }}
         run: python pipeline_ventas_gmail.py
 
       # ── 5. Persistir token si fue refrescado ───────────────────────────────

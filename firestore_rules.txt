@@ -1,0 +1,37 @@
+// ============================================================================
+// REGLAS PARA AGREGAR EN firestore.rules
+// Colecciones del módulo de Indicadores Comerciales
+// ============================================================================
+
+// Agregar dentro del bloque match /databases/{database}/documents {
+
+    // ── Ventas Analytics (ADN Vendedor + Sucursales) ──
+    match /ventas_analytics/{periodo} {
+      allow read: if request.auth != null;
+      allow write: if false; // Solo el script Python escribe
+
+      // Subcolección de vendedores
+      match /vendedores/{vendedorId} {
+        allow read: if request.auth != null;
+        allow write: if false;
+      }
+    }
+
+    // ── Clientes Analytics ──
+    match /clientes_analytics/{periodo} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    // ── Artículos Analytics ──
+    match /articulos_analytics/{periodo} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    // ── Config (pesos del score, etc.) ──
+    // Si ya tenés match /config/{doc}, verificá que permita read
+    match /config/adn-weights {
+      allow read: if request.auth != null;
+      allow write: if false; // Cambiar a true si querés que Tincho ajuste pesos desde el dashboard
+    }

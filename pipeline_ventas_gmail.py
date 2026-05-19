@@ -131,7 +131,11 @@ def get_gmail_service():
 # 2. BUSCAR Y DESCARGAR EMAIL
 # ─────────────────────────────────────────────────────────
 def buscar_email(service) -> str | None:
-    query  = f'subject:"{ASUNTO_EMAIL}" -label:{LABEL_PROCESADO} has:attachment'
+    query = os.getenv("GMAIL_SEARCH_QUERY")
+    if not query:
+        query = f'subject:"{ASUNTO_EMAIL}" -label:{LABEL_PROCESADO} has:attachment'
+    
+    log.info(f"Buscando email con query: {query}")
     result = service.users().messages().list(
         userId="me", q=query, maxResults=1
     ).execute()
